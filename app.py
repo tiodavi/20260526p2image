@@ -1,11 +1,10 @@
 import os
-import uuid  # 引入 uuid 模組來生成乾淨的唯一檔名
+import uuid
 import requests  
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
-# Flask 訊息閃現所需的加密金鑰
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "pure-vercel-blob-secret")
 
 # ==========================================
@@ -15,15 +14,13 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# 乾淨的圖片資料表模型
 class UserImage(db.Model):
     __tablename__ = 'user_images'
     id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(100), nullable=False)          # 圖片標題
-    url = db.Column(db.String(500), nullable=False)            # 儲存 Vercel Blob 的永久圖片網址
+    title = db.Column(db.String(100), nullable=False)          
+    url = db.Column(db.String(500), nullable=False)            
     created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
 
-# 自動在 Neon 資料庫中建立資料表
 with app.app_context():
     db.create_all()
 
@@ -119,13 +116,11 @@ HTML_TEMPLATE = """
 # 3. 路由邏輯 (Routes)
 # ==========================================
 
-# 首頁：撈取所有資料，並直接渲染內嵌的 HTML 字串
 @app.route('/')
 def index():
     records = UserImage.query.order_by(UserImage.created_at.desc()).all()
     return render_template_string(HTML_TEMPLATE, records=records)
 
-# 處理檔案上傳的路由
 @app.route('/upload', methods=['POST'])
 def upload():
     title = request.form.get('title', '未命名相片')
@@ -133,40 +128,46 @@ def upload():
 
     if file and file.filename != '':
         try:
-            # 1. 從 Vercel 環境變數中自動取得 Blob 的 Token
+            # 1. 從環境變數取得 Token
             blob_token = os.environ.get("BLOB_READ_WRITE_TOKEN")
             if not blob_token:
                 raise Exception("找不到 BLOB_READ_WRITE_TOKEN，請確保 Vercel 後台有開通 Storage Blob")
 
-            # 2. 核心修正：抓取原檔案的副檔名（例如 .jpg, .png）
             ext = os.path.splitext(file.filename)[1].lower()
             if not ext:
-                ext = '.jpg'  # 若防禦性抓不到則預設為 .jpg
-                
-            # 使用 uuid4() 隨機生成一組絕對乾淨的檔名（例如: 5f9b2c3d-8e1a...jpg）
+                ext = '.jpg'
             clean_filename = f"{uuid.uuid4()}{ext}"
 
-            # 3. 準備發送給 Vercel Blob 官方 API 的標頭與新網址
-            url = f"https://blob.vercel-storage.com/{clean_filename}"
+            # 2. 終極修正方案：
+            # 不要把檔名接在 URL 後面！直接請求 Vercel Blob 的根上傳端點
+            url = "https://blob.vercel-storage.com/"
+            
+            # 將 Token 放入標頭，並指定這次上傳的檔案在雲端的名字與公開權限
             headers = {
                 "Authorization": f"Bearer {blob_token}",
-                "x-api-version": "2023-02-01",
+                "x-api-version": "2023-02-01"
             }
             
-            # 使用 requests.put 發送二進位流
-            response = requests.put(url, data=file.read(), headers=headers)
+            # 使用多表單欄位 (files) 方式發送，將原本網址有問題的檔名包進表單中
+            # 這能強迫伺服器接收標準 multipart 格式
+            files = {
+                'file': (clean_filename, file.read(), request.mimetype)
+            }
             
-            if response.status_code == 200:
+            response = requests.post(url, files=files, headers=headers)
+            
+            if response.status_code == 200 or response.status_code == 201:
                 res_data = response.json()
-                img_url = res_data['url']  # 成功後拿取永久公開圖片網址
+                img_url = res_data['url']  
                 
-                # 4. 將使用者自訂的標題 (title) 與乾淨網址寫入 Neon Postgres 資料庫
+                # 3. 寫入 Neon Postgres 資料庫
                 new_image = UserImage(title=title, url=img_url)
                 db.session.add(new_image)
                 db.session.commit()
                 
                 flash('圖片上傳成功，已成功同步到 Vercel Blob 與 Neon 資料庫！')
             else:
+                # 如果還是被拒絕，把 Vercel 回傳的詳細錯誤秀出來看
                 flash(f'Vercel Blob 伺服器拒絕: {response.text}')
 
         except Exception as e:
