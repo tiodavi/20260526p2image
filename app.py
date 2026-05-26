@@ -1,10 +1,11 @@
 import os
 import uuid
-import requests  
+import requests  # 使用最穩定的 HTTP 請求
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 
 app = Flask(__name__)
+# Flask 訊息閃現所需的加密金鑰
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "pure-vercel-blob-secret")
 
 # ==========================================
@@ -14,13 +15,15 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
+# 乾淨的圖片資料表模型
 class UserImage(db.Model):
     __tablename__ = 'user_images'
     id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(100), nullable=False)          
-    url = db.Column(db.String(500), nullable=False)            
+    title = db.Column(db.String(100), nullable=False)          # 圖片標題
+    url = db.Column(db.String(500), nullable=False)            # 儲存 Vercel Blob 的永久圖片網址
     created_at = db.Column(db.DateTime, default=db.func.current_timestamp())
 
+# 自動在 Neon 資料庫中建立資料表
 with app.app_context():
     db.create_all()
 
@@ -116,11 +119,13 @@ HTML_TEMPLATE = """
 # 3. 路由邏輯 (Routes)
 # ==========================================
 
+# 首頁：撈取所有資料，並直接渲染內嵌的 HTML 字串
 @app.route('/')
 def index():
     records = UserImage.query.order_by(UserImage.created_at.desc()).all()
     return render_template_string(HTML_TEMPLATE, records=records)
 
+# 處理檔案上傳的路由
 @app.route('/upload', methods=['POST'])
 def upload():
     title = request.form.get('title', '未命名相片')
@@ -128,46 +133,41 @@ def upload():
 
     if file and file.filename != '':
         try:
-            # 1. 從環境變數取得 Token
+            # 1. 從 Vercel 環境變數中自動取得 Blob 的 Token
             blob_token = os.environ.get("BLOB_READ_WRITE_TOKEN")
             if not blob_token:
                 raise Exception("找不到 BLOB_READ_WRITE_TOKEN，請確保 Vercel 後台有開通 Storage Blob")
 
+            # 2. 擷取原檔案的副檔名，並產生乾淨的 UUID 檔名
             ext = os.path.splitext(file.filename)[1].lower()
             if not ext:
-                ext = '.jpg'
-            clean_filename = f"{uuid.uuid4()}{ext}"
+                ext = '.jpg'  
+            clean_filename = f"{uuid.uuid4().hex}{ext}"
 
-            # 2. 終極修正方案：
-            # 不要把檔名接在 URL 後面！直接請求 Vercel Blob 的根上傳端點
-            url = "https://blob.vercel-storage.com/"
+            # 3. 終極破關核心：網址尾端必須加上 `?multipart=false`！
+            # 這是 Vercel 規定在不使用 SDK、採用單一檔案直接上傳時必帶的參數
+            url = f"https://blob.vercel-storage.com/{clean_filename}?multipart=false"
             
-            # 將 Token 放入標頭，並指定這次上傳的檔案在雲端的名字與公開權限
             headers = {
                 "Authorization": f"Bearer {blob_token}",
-                "x-api-version": "2023-02-01"
+                "x-api-version": "2023-02-01",
+                "x-add-random-suffix": "true"  # 讓 Vercel 自動加上亂數字尾防衝突
             }
             
-            # 使用多表單欄位 (files) 方式發送，將原本網址有問題的檔名包進表單中
-            # 這能強迫伺服器接收標準 multipart 格式
-            files = {
-                'file': (clean_filename, file.read(), request.mimetype)
-            }
+            # 使用 PUT 請求，並將檔案的二進位內容直接塞進 Data Body
+            response = requests.put(url, data=file.read(), headers=headers)
             
-            response = requests.post(url, files=files, headers=headers)
-            
-            if response.status_code == 200 or response.status_code == 201:
+            if response.status_code == 200:
                 res_data = response.json()
-                img_url = res_data['url']  
+                img_url = res_data['url']  # 成功拿取永久公開圖片網址
                 
-                # 3. 寫入 Neon Postgres 資料庫
+                # 4. 將圖片資訊與 URL 寫入 Neon Postgres 資料庫
                 new_image = UserImage(title=title, url=img_url)
                 db.session.add(new_image)
                 db.session.commit()
                 
                 flash('圖片上傳成功，已成功同步到 Vercel Blob 與 Neon 資料庫！')
             else:
-                # 如果還是被拒絕，把 Vercel 回傳的詳細錯誤秀出來看
                 flash(f'Vercel Blob 伺服器拒絕: {response.text}')
 
         except Exception as e:
