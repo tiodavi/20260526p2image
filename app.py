@@ -1,7 +1,8 @@
 import os
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
-import vercel_blob  # 引入 Vercel 官方 Blob 儲存 SDK
+# 核心修正：直接從底層的 blob 模組中匯入 put 函式
+from vercel_blob.blob import put
 
 app = Flask(__name__)
 # Flask 訊息閃現所需的加密金鑰
