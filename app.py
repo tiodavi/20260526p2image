@@ -1,5 +1,5 @@
 import os
-import requests  # 換成標準的 HTTP 請求套件
+import requests  # 核心修正：改用標準 HTTP 請求，徹底避開 Vercel Blob SDK 的 Bug
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 
@@ -133,19 +133,35 @@ def upload():
 
     if file and file.filename != '':
         try:
-            # 1. 核心步驟：直接將檔案推送到 Vercel 原生 Blob 儲存空間
-            #blob = vercel_blob.put(file.filename, file.read(), {"access": "public"})
-            ##
-            # 使用 blob.put 確保直接呼叫到正確的底層函式
-            blob = vercel_blob.blob.put(file.filename, file.read(), {"access": "public"})
-            img_url = blob['url']  # 成功後直接拿到 Vercel 提供的永久公開 URL
+            # 1. 從 Vercel 環境變數中自動取得 Blob 的 Token
+            blob_token = os.environ.get("BLOB_READ_WRITE_TOKEN")
+            if not blob_token:
+                raise Exception("找不到 BLOB_READ_WRITE_TOKEN，請確保 Vercel 後台有開通 Storage Blob")
+
+            # 2. 準備發送給 Vercel Blob 官方 API 的標頭與 URL
+            # Vercel Blob API 規範：把 Token 放 Header，檔案二進位放 Body 直接 PUT
+            url = f"https://blob.vercel-storage.com/{file.filename}"
+            headers = {
+                "Authorization": f"Bearer {blob_token}",
+                "x-api-version": "2023-02-01",
+            }
             
-            # 2. 將圖片資訊與 URL 寫入 Neon Postgres 資料庫
-            new_image = UserImage(title=title, url=img_url)
-            db.session.add(new_image)
-            db.session.commit()
+            # 使用 requests.put 發送二進位流
+            response = requests.put(url, data=file.read(), headers=headers)
             
-            flash('圖片上傳成功，已成功同步到 Vercel Blob 與 Neon 資料庫！')
+            if response.status_code == 200:
+                res_data = response.json()
+                img_url = res_data['url']  # 成功後直接拿取永久公開圖片網址
+                
+                # 3. 將圖片資訊與 URL 寫入 Neon Postgres 資料庫
+                new_image = UserImage(title=title, url=img_url)
+                db.session.add(new_image)
+                db.session.commit()
+                
+                flash('圖片上傳成功，已成功同步到 Vercel Blob 與 Neon 資料庫！')
+            else:
+                flash(f'Vercel Blob 伺服器拒絕: {response.text}')
+
         except Exception as e:
             flash(f'上傳過程中發生錯誤: {str(e)}')
             
