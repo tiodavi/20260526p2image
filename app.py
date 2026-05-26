@@ -134,7 +134,9 @@ def upload():
     if file and file.filename != '':
         try:
             # 1. 核心步驟：直接將檔案推送到 Vercel 原生 Blob 儲存空間
-            blob = vercel_blob.put(file.filename, file.read(), {"access": "public"})
+            #blob = vercel_blob.put(file.filename, file.read(), {"access": "public"})
+            # 使用 blob.put 確保直接呼叫到正確的底層函式
+            blob = vercel_blob.blob.put(file.filename, file.read(), {"access": "public"})
             img_url = blob['url']  # 成功後直接拿到 Vercel 提供的永久公開 URL
             
             # 2. 將圖片資訊與 URL 寫入 Neon Postgres 資料庫
