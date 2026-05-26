@@ -1,6 +1,7 @@
 import os
 import uuid
-import requests  # 使用最穩定的標準 HTTP 請求
+import urllib.parse  # 核心修正：引入網址編碼模組
+import requests  
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 
@@ -67,7 +68,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <h1>🖼️ 我的雲端圖片展示牆 (CRUD 完整版)</h1>
+            <h1>🖼️ 我的雲端圖片展示牆 (CRUD 完美版)</h1>
             <p>架構：Vercel (Flask) + Vercel Blob (儲存) + Neon (Postgres 資料庫)</p>
         </header>
 
@@ -174,7 +175,7 @@ def upload():
     return redirect(url_for('index'))
 
 # ==========================================
-# 破關修正：正統 RESTful DELETE 請求
+# 終極破解修正：將網址進行 URL 編碼後發送 DELETE 請求
 # ==========================================
 @app.route('/delete/<int:image_id>', methods=['POST'])
 def delete(image_id):
@@ -185,19 +186,21 @@ def delete(image_id):
         if not blob_token:
             raise Exception("找不到 BLOB_READ_WRITE_TOKEN")
 
-        # 核心優化：直接將目標圖片網址作為參數丟給 v1/objects 端點，並採用 DELETE 方法
-        delete_url = f"https://blob.vercel-storage.com/v1/objects?url={image_record.url}"
+        # 核心修正：將資料庫存的 URL 進行安全網址編碼 (URL Encode)
+        encoded_url = urllib.parse.quote_plus(image_record.url)
+        
+        # 將編碼後的網址拼接在參數後方
+        delete_url = f"https://blob.vercel-storage.com/v1/objects?url={encoded_url}"
         
         headers = {
             "Authorization": f"Bearer {blob_token}",
             "x-api-version": "7"
         }
         
-        # 發送標準 HTTP DELETE 請求
         response = requests.delete(delete_url, headers=headers)
         
-        if response.status_code == 200 or response.status_code == 244 or response.status_code == 204:
-            # 雲端刪除成功後，清除 Neon 資料庫紀錄
+        # Vercel Blob 刪除成功通常會回傳 200 OK
+        if response.status_code == 200 or response.status_code == 204:
             db.session.delete(image_record)
             db.session.commit()
             flash(f'成功刪除照片「{image_record.title}」！')
