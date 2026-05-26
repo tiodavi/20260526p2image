@@ -1,5 +1,6 @@
 import os
-import requests  # 核心修正：改用標準 HTTP 請求，徹底避開 Vercel Blob SDK 的 Bug
+import uuid  # 引入 uuid 模組來生成乾淨的唯一檔名
+import requests  
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 
@@ -10,7 +11,6 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "pure-vercel-blob-secret")
 # ==========================================
 # 1. Neon Postgres 資料庫設定
 # ==========================================
-# 提示：在 Vercel 貼上連線字串時，請記得手動將 postgres:// 改為 postgresql://
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get("DATABASE_URL")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -138,9 +138,16 @@ def upload():
             if not blob_token:
                 raise Exception("找不到 BLOB_READ_WRITE_TOKEN，請確保 Vercel 後台有開通 Storage Blob")
 
-            # 2. 準備發送給 Vercel Blob 官方 API 的標頭與 URL
-            # Vercel Blob API 規範：把 Token 放 Header，檔案二進位放 Body 直接 PUT
-            url = f"https://blob.vercel-storage.com/{file.filename}"
+            # 2. 核心修正：抓取原檔案的副檔名（例如 .jpg, .png）
+            ext = os.path.splitext(file.filename)[1].lower()
+            if not ext:
+                ext = '.jpg'  # 若防禦性抓不到則預設為 .jpg
+                
+            # 使用 uuid4() 隨機生成一組絕對乾淨的檔名（例如: 5f9b2c3d-8e1a...jpg）
+            clean_filename = f"{uuid.uuid4()}{ext}"
+
+            # 3. 準備發送給 Vercel Blob 官方 API 的標頭與新網址
+            url = f"https://blob.vercel-storage.com/{clean_filename}"
             headers = {
                 "Authorization": f"Bearer {blob_token}",
                 "x-api-version": "2023-02-01",
@@ -151,9 +158,9 @@ def upload():
             
             if response.status_code == 200:
                 res_data = response.json()
-                img_url = res_data['url']  # 成功後直接拿取永久公開圖片網址
+                img_url = res_data['url']  # 成功後拿取永久公開圖片網址
                 
-                # 3. 將圖片資訊與 URL 寫入 Neon Postgres 資料庫
+                # 4. 將使用者自訂的標題 (title) 與乾淨網址寫入 Neon Postgres 資料庫
                 new_image = UserImage(title=title, url=img_url)
                 db.session.add(new_image)
                 db.session.commit()
