@@ -1,6 +1,6 @@
 import os
 import uuid
-import requests  # 使用最穩定的 HTTP 請求
+import requests  # 使用最穩定的標準 HTTP 請求
 from flask import Flask, request, redirect, url_for, flash, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 
@@ -144,20 +144,18 @@ def upload():
                 ext = '.jpg'  
             clean_filename = f"{uuid.uuid4().hex}{ext}"
 
-            # 3. 終極破關核心：網址尾端必須加上 `?multipart=false`！
-            # 這是 Vercel 規定在不使用 SDK、採用單一檔案直接上傳時必帶的參數
-            url = f"https://blob.vercel-storage.com/{clean_filename}?multipart=false"
+            # 3. 破關核心：修正網址為 /v1/objects/ 並帶上參數
+            url = f"https://blob.vercel-storage.com/v1/objects/{clean_filename}?multipart=false"
             
             headers = {
                 "Authorization": f"Bearer {blob_token}",
-                "x-api-version": "2023-02-01",
-                "x-add-random-suffix": "true"  # 讓 Vercel 自動加上亂數字尾防衝突
+                "x-api-version": "7",  # 指定 Vercel Blob 的最新 Edge 協定版本
             }
             
-            # 使用 PUT 請求，並將檔案的二進位內容直接塞進 Data Body
+            # 使用 PUT 請求，將檔案的二進位內容直接塞進 Data Body
             response = requests.put(url, data=file.read(), headers=headers)
             
-            if response.status_code == 200:
+            if response.status_code == 200 or response.status_code == 201:
                 res_data = response.json()
                 img_url = res_data['url']  # 成功拿取永久公開圖片網址
                 
