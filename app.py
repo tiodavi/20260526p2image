@@ -30,6 +30,7 @@ with app.app_context():
 # ==========================================
 # 2. 前端內嵌 HTML 網頁範本 (Jinja2 語法)
 # ==========================================
+# 核心升級：在卡片下方加入刪除按鈕與相關樣式
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="zh-TW">
@@ -54,18 +55,20 @@ HTML_TEMPLATE = """
         button:hover { background: #222222; }
         .flash-msg { background: #fff3cd; color: #856404; padding: 12px; border-radius: 6px; margin-bottom: 20px; border: 1px solid #ffeeba; font-size: 14px; }
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
-        .card { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .card { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: flex; flex-direction: column; }
         .card img { width: 100%; height: 180px; object-fit: cover; display: block; }
-        .card-body { padding: 15px; }
+        .card-body { padding: 15px; flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; }
         .card-title { font-weight: bold; font-size: 16px; color: #222; word-break: break-all; }
-        .card-time { font-size: 12px; color: #888; margin-top: 8px; }
+        .card-time { font-size: 12px; color: #888; margin-top: 8px; margin-bottom: 12px; }
+        .btn-delete { background: #dc3545; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: normal; width: fit-content; align-self: flex-end; transition: background 0.2s; }
+        .btn-delete:hover { background: #bd2130; }
         .empty-text { color: #999; text-align: center; width: 100%; padding: 40px 0; font-style: italic; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>🖼️ 我的雲端圖片展示牆</h1>
+            <h1>🖼️ 我的雲端圖片展示牆 (CRUD 升級版)</h1>
             <p>架構：Vercel (Flask) + Vercel Blob (儲存) + Neon (Postgres 資料庫)</p>
         </header>
 
@@ -100,8 +103,13 @@ HTML_TEMPLATE = """
                     <div class="card">
                         <img src="{{ item.url }}" alt="User Image">
                         <div class="card-body">
-                            <div class="card-title">{{ item.title }}</div>
-                            <div class="card-time">{{ item.created_at.strftime('%Y-%m-%d %H:%M') }}</div>
+                            <div>
+                                <div class="card-title">{{ item.title }}</div>
+                                <div class="card-time">{{ item.created_at.strftime('%Y-%m-%d %H:%M') }}</div>
+                            </div>
+                            <form action="{{ url_for('delete', image_id=item.id) }}" method="POST" onsubmit="return confirm('確定要永久刪除這張照片嗎？');">
+                                <button type="submit" class="btn-delete">🗑️ 刪除</button>
+                            </form>
                         </div>
                     </div>
                     {% else %}
@@ -119,13 +127,13 @@ HTML_TEMPLATE = """
 # 3. 路由邏輯 (Routes)
 # ==========================================
 
-# 首頁：撈取所有資料，並直接渲染內嵌的 HTML 字串
+# 首頁：撈取所有資料
 @app.route('/')
 def index():
     records = UserImage.query.order_by(UserImage.created_at.desc()).all()
     return render_template_string(HTML_TEMPLATE, records=records)
 
-# 處理檔案上傳的路由
+# 處理檔案上傳
 @app.route('/upload', methods=['POST'])
 def upload():
     title = request.form.get('title', '未命名相片')
@@ -133,33 +141,28 @@ def upload():
 
     if file and file.filename != '':
         try:
-            # 1. 從 Vercel 環境變數中自動取得 Blob 的 Token
             blob_token = os.environ.get("BLOB_READ_WRITE_TOKEN")
             if not blob_token:
                 raise Exception("找不到 BLOB_READ_WRITE_TOKEN，請確保 Vercel 後台有開通 Storage Blob")
 
-            # 2. 擷取原檔案的副檔名，並產生乾淨的 UUID 檔名
             ext = os.path.splitext(file.filename)[1].lower()
             if not ext:
                 ext = '.jpg'  
             clean_filename = f"{uuid.uuid4().hex}{ext}"
 
-            # 3. 破關核心：修正網址為 /v1/objects/ 並帶上參數
             url = f"https://blob.vercel-storage.com/v1/objects/{clean_filename}?multipart=false"
             
             headers = {
                 "Authorization": f"Bearer {blob_token}",
-                "x-api-version": "7",  # 指定 Vercel Blob 的最新 Edge 協定版本
+                "x-api-version": "7",
             }
             
-            # 使用 PUT 請求，將檔案的二進位內容直接塞進 Data Body
             response = requests.put(url, data=file.read(), headers=headers)
             
             if response.status_code == 200 or response.status_code == 201:
                 res_data = response.json()
-                img_url = res_data['url']  # 成功拿取永久公開圖片網址
+                img_url = res_data['url']  
                 
-                # 4. 將圖片資訊與 URL 寫入 Neon Postgres 資料庫
                 new_image = UserImage(title=title, url=img_url)
                 db.session.add(new_image)
                 db.session.commit()
@@ -171,6 +174,51 @@ def upload():
         except Exception as e:
             flash(f'上傳過程中發生錯誤: {str(e)}')
             
+    return redirect(url_for('index'))
+
+# ==========================================
+# 核心新增：處理刪除檔案的路由 (CRUD - Delete)
+# ==========================================
+@app.route('/delete/<int:image_id>', methods=['POST'])
+def delete(image_id):
+    # 1. 先從本地 Neon Postgres 撈出這筆資料
+    image_record = UserImage.query.get_or_404(image_id)
+    
+    try:
+        blob_token = os.environ.get("BLOB_READ_WRITE_TOKEN")
+        if not blob_token:
+            raise Exception("找不到 BLOB_READ_WRITE_TOKEN")
+
+        # Vercel Blob 刪除规范：
+        # 端點為 https://blob.vercel-storage.com/v1/delete
+        # Method 必須為 POST
+        # Body 必須送入 JSON，格式為 {"urls": ["你要刪除的永久圖片網址"]}
+        delete_url = "https://blob.vercel-storage.com/v1/delete"
+        
+        headers = {
+            "Authorization": f"Bearer {blob_token}",
+            "x-api-version": "7",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "urls": [image_record.url]
+        }
+        
+        # 發送刪除請求給 Vercel
+        response = requests.post(delete_url, json=payload, headers=headers)
+        
+        if response.status_code == 200 or response.status_code == 204:
+            # 2. 雲端實體檔案刪除成功後，再把 Neon 資料庫紀錄移除
+            db.session.delete(image_record)
+            db.session.commit()
+            flash(f'成功刪除照片「{image_record.title}」，已同步清空雲端空間與資料庫紀錄！')
+        else:
+            flash(f'Vercel Blob 拒絕刪除雲端檔案: {response.text}')
+            
+    except Exception as e:
+        flash(f'刪除過程中發生錯誤: {str(e)}')
+
     return redirect(url_for('index'))
 
 if __name__ == '__main__':
